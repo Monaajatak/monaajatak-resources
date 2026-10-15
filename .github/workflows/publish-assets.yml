@@ -1,0 +1,76 @@
+name: Publish app assets
+
+# Builds the files the app downloads at runtime and publishes them as GitHub
+# Release assets. Every file is checked against the sha256 the app pins
+# before upload, and downloaded back from its public URL after publishing,
+# so a release can only ever serve the exact bytes the app expects.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  # The 604 QCF v4 fonts are byte-identical to m4hmoud-atef/qcf_quran here.
+  QCF_UPSTREAM_SHA: 52b0a9f24dbfc234dfa7228f59eec9a4b542d9b3
+  QCF_TAG: qcf-fonts-v1
+  QCF_TAR_SHA256: b87da2bb4dd020cbf0388c30af825233d0181e560595b0394ce41d6ef8b229ec
+  TAFSIR_TAG: tafsir-v1
+  TAFSIR_SOURCE_COMMIT: 692fe8ea0434f914c1150f7dfb36371eabc67e0d
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build QCF fonts archive
+        run: |
+          curl -fsSL "https://codeload.github.com/m4hmoud-atef/qcf_quran/tar.gz/$QCF_UPSTREAM_SHA" | tar -xz
+          python3 scripts/build_qcf_tar.py "qcf_quran-$QCF_UPSTREAM_SHA/assets/fonts/qcf4" qcf-v4-fonts.tar
+          echo "$QCF_TAR_SHA256  qcf-v4-fonts.tar" | sha256sum -c -
+
+      - name: Extract tafsir databases
+        run: |
+          git show "$TAFSIR_SOURCE_COMMIT:dbs/tafsir-as-saadi.db.gz" > tafsir-as-saadi.db.gz
+          git show "$TAFSIR_SOURCE_COMMIT:dbs/ar-tafsir-ibn-kathir.db.gz" > ar-tafsir-ibn-kathir.db.gz
+          sha256sum -c - <<'EOF'
+          73fddc2e029d97e6481bb87ea5cd8c5cc6ee677a54e6b31cbde62398077aca53  tafsir-as-saadi.db.gz
+          5241a2e0f87be760f323aa9818d52e9f06a930aca766c96ca013659bdeb704a3  ar-tafsir-ibn-kathir.db.gz
+          EOF
+
+      - name: Publish releases
+        run: |
+          publish() {
+            tag=$1 title=$2 notes=$3
+            shift 3
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" --draft --title "$title" --notes "$notes"
+            fi
+            gh release upload "$tag" "$@" --clobber
+            gh release edit "$tag" --draft=false
+          }
+
+          publish "$QCF_TAG" "QCF v4 mushaf fonts v1" \
+            "The 604 per-page QCF v4 (tajweed) mushaf fonts as an uncompressed, reproducible ustar archive (the WOFF files are already compressed). Built by scripts/build_qcf_tar.py from m4hmoud-atef/qcf_quran@$QCF_UPSTREAM_SHA. sha256: $QCF_TAR_SHA256. The app pins this hash, so changing the file needs a new tag." \
+            qcf-v4-fonts.tar
+
+          publish "$TAFSIR_TAG" "Tafsir databases v1" \
+            "Gzipped SQLite tafsir databases the app downloads on demand. Same files as dbs/ at $TAFSIR_SOURCE_COMMIT." \
+            tafsir-as-saadi.db.gz ar-tafsir-ibn-kathir.db.gz
+
+      - name: Verify public download URLs
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download"
+          mkdir check && cd check
+          curl -fsSL -o qcf-v4-fonts.tar "$base/$QCF_TAG/qcf-v4-fonts.tar"
+          curl -fsSL -o tafsir-as-saadi.db.gz "$base/$TAFSIR_TAG/tafsir-as-saadi.db.gz"
+          curl -fsSL -o ar-tafsir-ibn-kathir.db.gz "$base/$TAFSIR_TAG/ar-tafsir-ibn-kathir.db.gz"
+          sha256sum -c - <<EOF
+          $QCF_TAR_SHA256  qcf-v4-fonts.tar
+          73fddc2e029d97e6481bb87ea5cd8c5cc6ee677a54e6b31cbde62398077aca53  tafsir-as-saadi.db.gz
+          5241a2e0f87be760f323aa9818d52e9f06a930aca766c96ca013659bdeb704a3  ar-tafsir-ibn-kathir.db.gz
+          EOF
